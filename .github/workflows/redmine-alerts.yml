@@ -2,88 +2,68 @@ name: Redmine Discrepancy Alerts
 
 on:
   schedule:
-    # Check for new tickets every 5 minutes
-    - cron: '*/5 * * * *'
-    # Send daily digest at 9:00 AM Nepal Time (UTC+5:45 = 03:15 UTC)
-    - cron: '15 3 * * *'
-  workflow_dispatch:   # allows manual trigger from GitHub UI
+    - cron: '*/5 * * * *'       # every 5 min — check new tickets
+    - cron: '15 3 * * *'        # 9:00 AM Nepal Time (UTC+5:45 = 03:15 UTC) — daily digest
+  workflow_dispatch:              # manual trigger from GitHub UI
 
 jobs:
   check-tickets:
-    # Only runs on the 5-minute schedule (not the 9am digest cron)
     if: github.event.schedule == '*/5 * * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Restore state file
+      - name: Restore state
         uses: actions/cache@v4
         with:
           path: state.json
           key: redmine-state-${{ github.run_id }}
           restore-keys: redmine-state-
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests
+      - run: pip install requests
 
       - name: Run ticket checker
         env:
-          REDMINE_URL:    ${{ secrets.REDMINE_URL }}
-          REDMINE_KEY:    ${{ secrets.REDMINE_KEY }}
-          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
-          ALERT_TO:       ${{ secrets.ALERT_TO }}
-          MODE:           check
+          MODE: check
         run: python checker.py
 
-      - name: Save state file
+      - name: Save state
         uses: actions/cache@v4
         with:
           path: state.json
           key: redmine-state-${{ github.run_id }}
 
   send-digest:
-    # Only runs on the 9am Nepal digest schedule
     if: github.event.schedule == '15 3 * * *'
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Restore state file
+      - name: Restore state
         uses: actions/cache@v4
         with:
           path: state.json
           key: redmine-state-${{ github.run_id }}
           restore-keys: redmine-state-
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests
+      - run: pip install requests
 
       - name: Send daily digest
         env:
-          REDMINE_URL:    ${{ secrets.REDMINE_URL }}
-          REDMINE_KEY:    ${{ secrets.REDMINE_KEY }}
-          GMAIL_USER:     ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
-          ALERT_TO:       ${{ secrets.ALERT_TO }}
-          MODE:           digest
+          MODE: digest
         run: python checker.py
 
-      - name: Save state file (queue cleared)
+      - name: Save state
         uses: actions/cache@v4
         with:
           path: state.json
