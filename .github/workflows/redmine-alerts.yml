@@ -2,13 +2,11 @@ name: Redmine Discrepancy Alerts
 
 on:
   schedule:
-    - cron: '*/5 * * * *'       # every 5 min — check new tickets
-    - cron: '15 3 * * *'        # 9:00 AM Nepal Time (UTC+5:45 = 03:15 UTC) — daily digest
-  workflow_dispatch:              # manual trigger from GitHub UI
+    - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch:          # manual trigger
 
 jobs:
   check-tickets:
-    if: github.event.schedule == '*/5 * * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,41 +24,9 @@ jobs:
 
       - run: pip install requests
 
-      - name: Run ticket checker
+      - name: Run checker
         env:
           GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
-          MODE: check
-        run: python checker.py
-
-      - name: Save state
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: redmine-state-${{ github.run_id }}
-
-  send-digest:
-    if: github.event.schedule == '15 3 * * *'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Restore state
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: redmine-state-${{ github.run_id }}
-          restore-keys: redmine-state-
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - run: pip install requests
-
-      - name: Send daily digest
-        env:
-          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
-          MODE: digest
         run: python checker.py
 
       - name: Save state
