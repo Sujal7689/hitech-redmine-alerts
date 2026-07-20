@@ -1,11 +1,9 @@
 name: Redmine Discrepancy Alerts
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
   repository_dispatch:
-    types: [cron-trigger]
+    types: [redmine-webhook]
 
 jobs:
   check-tickets:
