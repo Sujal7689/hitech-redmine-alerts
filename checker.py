@@ -296,12 +296,12 @@ def check_ticket(issue):
             flag("WARNING", "Company Group ID", "Cloud product but Company Group ID is blank")
         if is_closed and is_blank(cloud_url):
             flag("WARNING", "Cloud/Web URL", "Cloud product — ticket closed but Cloud URL not filled")
-        if is_blank(asc_amount) or asc_amount == "0":
+        if is_blank(asc) or asc == "0":
             flag("WARNING", "ASC Amount", "Cloud product but Annual Subscription (ASC) amount is blank")
 
     # ── DESKTOP-SPECIFIC ──────────────────────────────────────────────────────
     if not is_cloud:
-        if is_blank(amc_amount) or amc_amount == "0":
+        if is_blank(amc) or amc == "0":
             flag("WARNING", "AMC Amount", "Desktop product but AMC amount is blank")
 
     return issues
