@@ -1,6 +1,8 @@
 name: Redmine Discrepancy Alerts
 
 on:
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [redmine-webhook]
@@ -25,8 +27,6 @@ jobs:
       - run: pip install requests
 
       - name: Run checker
-        env:
-          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
         run: python checker.py
 
       - name: Save state
