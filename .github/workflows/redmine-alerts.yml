@@ -2,8 +2,10 @@ name: Redmine Discrepancy Alerts
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes
-  workflow_dispatch:          # manual trigger
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [cron-trigger]
 
 jobs:
   check-tickets:
