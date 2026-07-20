@@ -14,17 +14,17 @@ from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# ── Config ────────────────────────────────────────────────────────────────────
-REDMINE_URL    = os.environ["http://3.7.179.127:82/redmine/"].rstrip("/")
-REDMINE_KEY    = os.environ["fff4a2a98f942c806109e44d54710c57bf949617"]
+# ── Config (all values hardcoded) ─────────────────────────────────────────────
+REDMINE_URL    = "http://3.7.179.127:82/redmine"
+REDMINE_KEY    = "fff4a2a98f942c806109e44d54710c57bf949617"
 PROJECT_ID     = 3
 TRACKER_ID     = 11
 
-GMAIL_USER     = os.environ["singhaniasujal7689@gmail.com"]
-GMAIL_PASS     = os.environ["ekqb jmrq rrdh czwf"]
-ALERT_TO       = [e.strip() for e in os.environ["sujal@hitechnepal.com.np, subodh@hitechnepal.com.np"].split(",")]
+GMAIL_USER     = "singhaniasujal7689@gmail.com"
+GMAIL_PASS     = os.environ.get("GMAIL_APP_PASS", "")   # still from secret — never hardcode passwords
+ALERT_TO       = ["sujal@hitechnepal.com.np", "subodh@hitechnepal.com.np"]
 
-STATE_FILE     = "state.json"   # tracks last-seen ticket ID + minor queue
+STATE_FILE     = "state.json"
 MODE           = os.environ.get("MODE", "check")   # "check" | "digest"
 
 # ── Custom Field IDs ──────────────────────────────────────────────────────────
@@ -64,7 +64,6 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 def cf_val(issue, cf_id):
-    """Extract a custom field value by ID."""
     for cf in issue.get("custom_fields", []):
         if cf["id"] == cf_id:
             return (cf.get("value") or "").strip()
@@ -74,10 +73,8 @@ def is_blank(val):
     return not val or val in [".", "..", "...", "....", ".....", "N/A", "n.a", "n,a", "na", "NA", "-", "null"]
 
 def is_numeric(val):
-    """Returns True if val is a clean number (no commas, dots as separator, text)."""
     try:
         float(val.replace(",", ""))
-        # But reject if it has comma thousands separators or formula text
         if "," in val or "+" in val or "%" in val or "/" in val or any(c.isalpha() for c in val):
             return False
         return True
@@ -88,7 +85,6 @@ def has_leading_dot(val):
     return bool(val and val.startswith(".") and len(val) > 1 and val[1:].replace(".", "").isdigit())
 
 def fetch_new_tickets(since_id):
-    """Fetch all Installation tickets newer than since_id."""
     headers = {"X-Redmine-API-Key": REDMINE_KEY}
     tickets = []
     offset = 0
@@ -114,7 +110,7 @@ def fetch_new_tickets(since_id):
             break
         for t in batch:
             if t["id"] <= since_id:
-                return tickets   # reached already-seen territory
+                return tickets
             tickets.append(t)
         offset += len(batch)
         if offset >= data.get("total_count", 0):
@@ -123,15 +119,8 @@ def fetch_new_tickets(since_id):
 
 # ── Rules Engine ──────────────────────────────────────────────────────────────
 def check_ticket(issue):
-    """
-    Returns (critical_issues, minor_issues) — both lists of strings.
-    """
     critical = []
     minor = []
-
-    tid     = issue["id"]
-    subject = issue.get("subject", "")
-    company = cf_val(issue, CF["company_name"]) or subject
 
     pay_status  = cf_val(issue, CF["payment_status"])
     pay_flag    = cf_val(issue, CF["payment_received"])
@@ -150,13 +139,13 @@ def check_ticket(issue):
     vat         = cf_val(issue, CF["vat"])
     sales_exec  = cf_val(issue, CF["sales_executive"])
 
-    # ── CRITICAL: Payment Status ──────────────────────────────────────────────
+    # CRITICAL: Payment Status
     if is_blank(pay_status):
         critical.append("Payment Status is blank")
     elif pay_status not in VALID_PAYMENT_STATUSES:
         critical.append(f"Payment Status has invalid value: '{pay_status}'")
 
-    # ── CRITICAL: Total Amount ────────────────────────────────────────────────
+    # CRITICAL: Total Amount
     if is_blank(total):
         critical.append("Total Amount is blank")
     elif not is_numeric(total):
@@ -164,41 +153,41 @@ def check_ticket(issue):
     elif float(total) == 0:
         critical.append("Total Amount is zero")
 
-    # ── CRITICAL: Received Amount format ─────────────────────────────────────
+    # CRITICAL: Received Amount format
     if not is_blank(received):
         if has_leading_dot(received):
             critical.append(f"Received Amount has leading dot (system reads as 0): '{received}'")
         elif not is_numeric(received):
             critical.append(f"Received Amount is not a clean number: '{received}'")
 
-    # ── CRITICAL: Fully Paid but Received = blank/zero ────────────────────────
+    # CRITICAL: Fully Paid but Received blank/zero
     if pay_status == "Fully Paid":
         if is_blank(received) or received == "0":
             critical.append("Payment Status = Fully Paid but Received Amount is blank or zero")
         if pay_flag != "1":
             critical.append("Payment Status = Fully Paid but Payment Received flag is not set")
 
-    # ── CRITICAL: Received > Total (more than 5% gap, not TDS) ───────────────
+    # CRITICAL: Received > Total by more than 5%
     if is_numeric(total) and is_numeric(received):
         t = float(total)
         r = float(received)
         if t > 0 and r > t * 1.05:
             critical.append(f"Received Amount ({r:,.0f}) exceeds Total Amount ({t:,.0f}) by more than 5%")
 
-    # ── CRITICAL: Lock checkbox mismatch ─────────────────────────────────────
+    # CRITICAL: Lock mismatch
     if lock_issued == "1" and is_blank(lock_no):
         critical.append("Lock Issued = YES but Lock No is empty")
     if lock_issued == "0" and not is_blank(lock_no) and not is_blank(lock_batch):
         critical.append("Lock No is filled but Lock Issued checkbox = NO")
 
-    # ── CRITICAL: VAT amount format ───────────────────────────────────────────
+    # CRITICAL: VAT format
     if not is_blank(vat):
         if has_leading_dot(vat):
             critical.append(f"VAT Amount has leading dot: '{vat}'")
-        elif vat in ["...", "....", ".."] :
+        elif vat in ["...", "....", ".."]:
             critical.append(f"VAT Amount is placeholder dots: '{vat}'")
 
-    # ── MINOR: License fields ─────────────────────────────────────────────────
+    # MINOR: License fields
     if is_blank(lic_code):
         minor.append("License Code is empty")
     if is_blank(lic_date):
@@ -206,7 +195,7 @@ def check_ticket(issue):
     if is_blank(expiry):
         minor.append("Software Expiry Date is blank")
 
-    # ── MINOR: Contact data ───────────────────────────────────────────────────
+    # MINOR: Contact data
     if is_blank(contact):
         minor.append("Contact Person is blank")
     if phone and "@" in phone:
@@ -216,11 +205,11 @@ def check_ticket(issue):
         if len(digits) > 0 and len(digits) != 9:
             minor.append(f"PAN number has {len(digits)} digits (Nepal PAN should be 9): '{pan}'")
 
-    # ── MINOR: Bill Type ──────────────────────────────────────────────────────
+    # MINOR: Bill Type
     if bill_type in ["NA", "N/A", "na", ""] and issue.get("status", {}).get("name") == "Closed":
         minor.append("Bill Type is NA/blank on a closed ticket")
 
-    # ── MINOR: Sales Executive ────────────────────────────────────────────────
+    # MINOR: Sales Executive
     if is_blank(sales_exec):
         minor.append("Sales Executive is blank")
 
@@ -267,7 +256,6 @@ def critical_email_html(issue, issues_list):
 </div>"""
 
 def digest_email_html(items):
-    """items = list of (ticket_id, company, author, created, minor_issues_list)"""
     today = datetime.now().strftime("%d %b %Y")
     sections = ""
     for tid, company, author, created, issues_list in items:
@@ -275,9 +263,9 @@ def digest_email_html(items):
         rows = "".join(f"<tr><td style='padding:6px 12px;border-bottom:1px solid #fef9c3;color:#78350f;font-size:13px'>• {i}</td></tr>" for i in issues_list)
         sections += f"""
         <div style="margin-bottom:16px;border:1px solid #fde68a;border-radius:6px;overflow:hidden">
-          <div style="background:#fef3c7;padding:8px 12px;display:flex;justify-content:space-between">
-            <span><a href="{url}" style="color:#92400e;font-weight:700;text-decoration:none">#{tid}</a> — {company}</span>
-            <span style="font-size:12px;color:#92400e">{author} · {created}</span>
+          <div style="background:#fef3c7;padding:8px 12px">
+            <a href="{url}" style="color:#92400e;font-weight:700;text-decoration:none">#{tid}</a> — {company}
+            <span style="float:right;font-size:12px;color:#92400e">{author} · {created}</span>
           </div>
           <table style="width:100%;border-collapse:collapse">{rows}</table>
         </div>"""
@@ -287,9 +275,9 @@ def digest_email_html(items):
     <h2 style="color:#fff;margin:0;font-size:16px">📋 Daily Minor Issues Digest — {today}</h2>
   </div>
   <div style="border:1px solid #fde68a;border-top:none;padding:20px 24px;background:#fff;border-radius:0 0 8px 8px">
-    <p style="margin:0 0 16px;font-size:13px;color:#6b7280">{len(items)} ticket(s) with minor data issues raised in the last 24 hours:</p>
+    <p style="margin:0 0 16px;font-size:13px;color:#6b7280">{len(items)} ticket(s) with minor data issues in the last 24 hours:</p>
     {sections}
-    <p style="font-size:12px;color:#9ca3af;margin-top:8px">These are non-critical — fix when possible to keep records clean.</p>
+    <p style="font-size:12px;color:#9ca3af;margin-top:8px">Non-critical — fix when possible to keep records clean.</p>
   </div>
   <p style="font-size:11px;color:#9ca3af;margin-top:8px;text-align:center">HiTech Redmine Alert System</p>
 </div>"""
@@ -315,12 +303,12 @@ def run_check():
         critical, minor = check_ticket(issue)
 
         if critical:
-            print(f"  #{tid} {company}: {len(critical)} CRITICAL issue(s) — sending email")
+            print(f"  #{tid} {company}: {len(critical)} CRITICAL — sending email")
             html = critical_email_html(issue, critical)
             send_email(f"🚨 HiTech Redmine Alert — #{tid} {company}", html)
 
         if minor:
-            print(f"  #{tid} {company}: {len(minor)} minor issue(s) — queuing for digest")
+            print(f"  #{tid} {company}: {len(minor)} minor — queuing")
             minor_queue.append({
                 "id": tid,
                 "company": company,
