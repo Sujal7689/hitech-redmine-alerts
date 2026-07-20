@@ -2,17 +2,14 @@
 HiTech Redmine Discrepancy Alert System
 - Checks every new Installation ticket (Project 3, Tracker 11)
 - Sends one email per ticket listing ALL issues found
-- No digest — everything is instant
+- Uses Microsoft Graph API for sending (no SMTP/password needed)
 """
 
 import os
 import json
 import re
-import smtplib
 import requests
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 # ── Config ────────────────────────────────────────────────────────────────────
 REDMINE_URL = "http://3.7.179.127:82/redmine"
@@ -20,9 +17,12 @@ REDMINE_KEY = "fff4a2a98f942c806109e44d54710c57bf949617"
 PROJECT_ID  = 3
 TRACKER_ID  = 11
 
-SMTP_USER   = "alerts@hitechnepal.com.np"
-SMTP_PASS   = os.environ.get("OUTLOOK_PASS", "")
-ALERT_TO    = ["sujal@hitechnepal.com.np", "subodh@hitechnepal.com.np"]
+# Microsoft Graph API config
+TENANT_ID     = "ee2c1707-fe2f-449b-bf11-679c0e05b4af"
+CLIENT_ID     = "a9511178-6add-4011-b94d-738d2c74ffbe"
+CLIENT_SECRET = "6Jj8Q~HXhYq0F8xnTRB4pBEJ-.uA~YArjQzCBchH"
+SENDER_EMAIL  = "alerts@hitechnepal.com.np"
+ALERT_TO      = ["sujal@hitechnepal.com.np", "subodh@hitechnepal.com.np"]
 
 STATE_FILE  = "state.json"
 
@@ -96,12 +96,10 @@ def is_blank(val):
     return not val or val in BLANK_VALUES
 
 def is_numeric_clean(val):
-    """True only if val is a plain number with no text, commas, symbols."""
     if not val:
         return False
     try:
         float(val)
-        # reject anything with formatting or text
         if any(c in val for c in [",", "+", "%", "/", " "]):
             return False
         if any(c.isalpha() for c in val):
@@ -111,16 +109,13 @@ def is_numeric_clean(val):
         return False
 
 def has_leading_dot(val):
-    """Catches values like .162720 which parse as 0."""
     return bool(
-        val
-        and val.startswith(".")
+        val and val.startswith(".")
         and len(val) > 1
         and val[1:].replace(".", "").isdigit()
     )
 
 def has_formula_text(val):
-    """Catches values like '40000+vat', '35,000+13%', '50000+Vat'."""
     if not val:
         return False
     return any(c in val for c in ["+", "%"]) or (
@@ -128,7 +123,6 @@ def has_formula_text(val):
     )
 
 def has_commas(val):
-    """Catches '71,190.00', '33,458.00' etc."""
     return bool(val and "," in val and not any(c.isalpha() for c in val))
 
 def is_cloud_product(issue):
@@ -139,7 +133,6 @@ def ticket_status(issue):
 
 # ── Rules Engine ──────────────────────────────────────────────────────────────
 def check_ticket(issue):
-    """Returns list of (severity, field, description) tuples."""
     issues = []
 
     def flag(severity, field, desc):
@@ -165,72 +158,68 @@ def check_ticket(issue):
     address     = cf_val(issue, CF["address"])
     email_id    = cf_val(issue, CF["email_id"])
     sw_cat      = cf_val(issue, CF["software_cat"])
-    server_type = cf_val(issue, CF["server_type"])
     cloud_url   = cf_val(issue, CF["cloud_url"])
     company_gid = cf_val(issue, CF["company_group_id"])
     amc         = cf_val(issue, CF["amc_amount"])
     asc         = cf_val(issue, CF["asc_amount"])
-    ird_doc     = cf_val(issue, CF["ird_doc"])
     status      = ticket_status(issue)
     is_cloud    = is_cloud_product(issue)
     is_closed   = status == "Closed"
 
-    # ── PAYMENT STATUS ────────────────────────────────────────────────────────
+    # PAYMENT STATUS
     if is_blank(pay_status):
         flag("CRITICAL", "Payment Status", "Blank — must be set to Credit / Fully Paid / Advance Paid / Partially Paid")
     elif pay_status not in VALID_PAYMENT_STATUSES:
         flag("CRITICAL", "Payment Status", f"Invalid value: '{pay_status}'")
 
-    # ── TOTAL AMOUNT ──────────────────────────────────────────────────────────
+    # TOTAL AMOUNT
     if is_blank(total) or total == "0":
         flag("CRITICAL", "Total Amount", "Blank or zero")
     elif has_formula_text(total):
         flag("CRITICAL", "Total Amount", f"Contains formula text instead of a number: '{total}'")
     elif has_commas(total):
-        flag("CRITICAL", "Total Amount", f"Has comma formatting — system may misread: '{total}' → remove commas")
+        flag("CRITICAL", "Total Amount", f"Has comma formatting — remove commas: '{total}'")
     elif not is_numeric_clean(total):
         flag("CRITICAL", "Total Amount", f"Not a clean number: '{total}'")
 
-    # ── RECEIVED AMOUNT ───────────────────────────────────────────────────────
+    # RECEIVED AMOUNT
     if not is_blank(received) and received != "0":
         if has_leading_dot(received):
             flag("CRITICAL", "Received Amount", f"Leading dot — system reads as 0: '{received}' → should be '{received.lstrip('.')}'")
         elif has_formula_text(received):
             flag("CRITICAL", "Received Amount", f"Contains formula text: '{received}'")
         elif has_commas(received):
-            flag("CRITICAL", "Received Amount", f"Has comma formatting: '{received}' → remove commas")
+            flag("CRITICAL", "Received Amount", f"Has comma formatting — remove commas: '{received}'")
         elif not is_numeric_clean(received):
             flag("CRITICAL", "Received Amount", f"Not a clean number: '{received}'")
 
-    # ── PAYMENT FLAG vs STATUS MISMATCH ──────────────────────────────────────
+    # PAYMENT FLAG vs STATUS
     if pay_status == "Fully Paid":
         if is_blank(received) or received == "0":
             flag("CRITICAL", "Received Amount", "Payment Status = Fully Paid but Received Amount is blank or zero")
         if pay_flag != "1":
             flag("CRITICAL", "Payment Received Flag", "Payment Status = Fully Paid but Payment Received checkbox is not ticked")
-
     if pay_flag == "1" and pay_status == "Credit":
         flag("CRITICAL", "Payment Status", "Payment Received flag = YES but Status still shows Credit — update status")
 
-    # ── RECEIVED > TOTAL (beyond TDS tolerance) ───────────────────────────────
+    # RECEIVED > TOTAL
     if is_numeric_clean(total) and is_numeric_clean(received):
         t = float(total)
         r = float(received)
         if t > 0 and r > t * 1.06:
-            flag("CRITICAL", "Amount Mismatch", f"Received ({r:,.0f}) exceeds Total ({t:,.0f}) by more than 6% — verify amounts")
+            flag("CRITICAL", "Amount Mismatch", f"Received ({r:,.0f}) exceeds Total ({t:,.0f}) by more than 6%")
 
-    # ── VAT FIELD ─────────────────────────────────────────────────────────────
+    # VAT FIELD
     if not is_blank(vat):
         if has_leading_dot(vat):
             flag("CRITICAL", "VAT Amount", f"Leading dot: '{vat}' — remove the dot")
         elif vat in ["...", "....", "..", "....."]:
-            flag("CRITICAL", "VAT Amount", f"Placeholder dots entered instead of amount: '{vat}'")
+            flag("CRITICAL", "VAT Amount", f"Placeholder dots: '{vat}'")
         elif has_commas(vat):
             flag("WARNING", "VAT Amount", f"Has comma formatting: '{vat}' → remove commas")
 
-    # ── LOCK FIELDS ───────────────────────────────────────────────────────────
+    # LOCK FIELDS
     if not is_cloud:
-        # Physical lock expected for desktop products
         if lock_issued == "1" and is_blank(lock_no):
             flag("CRITICAL", "Lock No", "Lock Issued = YES but Lock No is empty")
         if lock_issued == "1" and is_blank(lock_batch):
@@ -238,9 +227,8 @@ def check_ticket(issue):
         if lock_issued == "1" and is_blank(lock_date):
             flag("WARNING", "Lock Issued Date", "Lock Issued = YES but Lock Date not filled")
         if lock_issued == "0" and not is_blank(lock_no):
-            flag("CRITICAL", "Lock Issued", "Lock No is filled but Lock Issued checkbox = NO — tick the checkbox")
+            flag("CRITICAL", "Lock Issued", "Lock No is filled but Lock Issued checkbox = NO")
         if not is_blank(lock_no) and not is_blank(lock_batch):
-            # Detect reversed fields: lock serial in batch field and batch in lock field
             lock_no_looks_like_batch = lock_no.startswith("5524-") or lock_no.startswith("5523-")
             batch_looks_like_serial  = lock_batch.startswith("1003-") or lock_batch.startswith("2003-")
             if lock_no_looks_like_batch and batch_looks_like_serial:
@@ -248,11 +236,10 @@ def check_ticket(issue):
         if is_blank(lock_issued) and is_closed:
             flag("WARNING", "Lock Issued", "Ticket is closed but Lock Issued field is blank")
     else:
-        # Cloud product — no physical lock needed
         if lock_issued == "1" and is_blank(lock_no):
             flag("WARNING", "Lock Issued", "Cloud product — Lock Issued = YES but no Lock No. Consider reverting to NO")
 
-    # ── LICENSE FIELDS ────────────────────────────────────────────────────────
+    # LICENSE FIELDS
     if is_blank(lic_code) and not is_blank(lic_date):
         flag("WARNING", "License Code", "License Date is filled but License Code is empty")
     if not is_blank(lic_code) and is_blank(lic_date):
@@ -262,21 +249,21 @@ def check_ticket(issue):
     if is_closed and is_blank(lic_date):
         flag("WARNING", "License Issue Date", "Ticket is closed but License Issue Date is still empty")
 
-    # ── SOFTWARE EXPIRY ───────────────────────────────────────────────────────
+    # SOFTWARE EXPIRY
     if is_closed and is_blank(expiry):
         flag("WARNING", "Software Expiry Date", "Ticket is closed but Software Expiry Date is blank")
 
-    # ── BILL TYPE ─────────────────────────────────────────────────────────────
+    # BILL TYPE
     if is_blank(bill_type):
         flag("WARNING", "Bill Type", "Bill Type is blank")
     elif bill_type in ["NA", "N/A", "na"] and is_closed:
-        flag("WARNING", "Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type issued")
+        flag("WARNING", "Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type")
 
-    # ── CONTACT DATA ──────────────────────────────────────────────────────────
+    # CONTACT DATA
     if is_blank(contact):
         flag("WARNING", "Contact Person", "Blank — fill in client contact name")
     if phone and "@" in phone:
-        flag("WARNING", "Phone / Mobile", f"Email address entered in Phone field: '{phone}' — move to Email field")
+        flag("WARNING", "Phone / Mobile", f"Email address entered in Phone field: '{phone}'")
     if is_blank(phone) and is_blank(email_id):
         flag("WARNING", "Contact Details", "Both Phone and Email are blank")
     if is_blank(address):
@@ -286,11 +273,11 @@ def check_ticket(issue):
         if len(digits) > 0 and len(digits) != 9:
             flag("WARNING", "PAN Number", f"{len(digits)} digits found — Nepal PAN must be 9 digits: '{pan}'")
 
-    # ── SALES EXECUTIVE ───────────────────────────────────────────────────────
+    # SALES EXECUTIVE
     if is_blank(sales_exec):
         flag("WARNING", "Sales Executive", "Blank — assign a sales executive")
 
-    # ── CLOUD-SPECIFIC ────────────────────────────────────────────────────────
+    # CLOUD-SPECIFIC
     if is_cloud:
         if is_blank(company_gid):
             flag("WARNING", "Company Group ID", "Cloud product but Company Group ID is blank")
@@ -299,27 +286,55 @@ def check_ticket(issue):
         if is_blank(asc) or asc == "0":
             flag("WARNING", "ASC Amount", "Cloud product but Annual Subscription (ASC) amount is blank")
 
-    # ── DESKTOP-SPECIFIC ──────────────────────────────────────────────────────
+    # DESKTOP-SPECIFIC
     if not is_cloud:
         if is_blank(amc) or amc == "0":
             flag("WARNING", "AMC Amount", "Desktop product but AMC amount is blank")
 
     return issues
 
-# ── Email ─────────────────────────────────────────────────────────────────────
-def ticket_url(tid):
-    return f"{REDMINE_URL}/issues/{tid}"
+# ── Microsoft Graph Email ─────────────────────────────────────────────────────
+def get_access_token():
+    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "grant_type":    "client_credentials",
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope":         "https://graph.microsoft.com/.default",
+    }
+    resp = requests.post(url, data=data, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["access_token"]
 
 def send_email(subject, html_body):
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = SMTP_USER
-    msg["To"]      = ", ".join(ALERT_TO)
-    msg.attach(MIMEText(html_body, "html"))
-    with smtplib.SMTP("smtp.office365.com", 587) as smtp:
-        smtp.starttls()
-        smtp.login(SMTP_USER, SMTP_PASS)
-        smtp.sendmail(SMTP_USER, ALERT_TO, msg.as_string())
+    token = get_access_token()
+    url   = f"https://graph.microsoft.com/v1.0/users/{SENDER_EMAIL}/sendMail"
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {
+                "contentType": "HTML",
+                "content": html_body,
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in ALERT_TO
+            ],
+        }
+    }
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type":  "application/json",
+        },
+        json=payload,
+        timeout=30
+    )
+    resp.raise_for_status()
+    print(f"    Email sent successfully (status {resp.status_code})")
+
+def ticket_url(tid):
+    return f"{REDMINE_URL}/issues/{tid}"
 
 def build_email_html(issue, all_issues):
     tid     = issue["id"]
@@ -333,15 +348,14 @@ def build_email_html(issue, all_issues):
     critical_items = [(f, d) for s, f, d in all_issues if s == "CRITICAL"]
     warning_items  = [(f, d) for s, f, d in all_issues if s == "WARNING"]
 
-    def rows(items, color, bg, icon):
+    def rows(items, color, bg, icon, label):
         if not items:
             return ""
         header = f"""<tr>
           <th colspan="2" style="padding:8px 14px;background:{bg};color:{color};
               font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left">
-            {icon} {"Critical Issues" if icon == "🔴" else "Warnings"}
-          </th>
-        </tr>"""
+            {icon} {label}
+          </th></tr>"""
         body = "".join(f"""<tr>
           <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
               font-weight:600;color:#374151;width:160px;vertical-align:top">{f}</td>
@@ -350,8 +364,8 @@ def build_email_html(issue, all_issues):
         </tr>""" for f, d in items)
         return header + body
 
-    critical_rows = rows(critical_items, "#991b1b", "#fee2e2", "🔴")
-    warning_rows  = rows(warning_items,  "#92400e", "#fef3c7", "🟡")
+    critical_rows = rows(critical_items, "#991b1b", "#fee2e2", "🔴", "Critical Issues")
+    warning_rows  = rows(warning_items,  "#92400e", "#fef3c7", "🟡", "Warnings")
 
     header_color = "#dc2626" if critical_items else "#d97706"
     title        = "🚨 Critical Issues Found" if critical_items else "⚠️ Data Issues Found"
