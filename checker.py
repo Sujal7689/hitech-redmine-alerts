@@ -15,14 +15,14 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REDMINE_URL    = os.environ["REDMINE_URL"].rstrip("/")
-REDMINE_KEY    = os.environ["REDMINE_KEY"]
+REDMINE_URL    = os.environ["http://3.7.179.127:82/redmine/"].rstrip("/")
+REDMINE_KEY    = os.environ["fff4a2a98f942c806109e44d54710c57bf949617"]
 PROJECT_ID     = 3
 TRACKER_ID     = 11
 
-GMAIL_USER     = os.environ["GMAIL_USER"]
-GMAIL_PASS     = os.environ["GMAIL_APP_PASS"]
-ALERT_TO       = [e.strip() for e in os.environ["ALERT_TO"].split(",")]
+GMAIL_USER     = os.environ["singhaniasujal7689@gmail.com"]
+GMAIL_PASS     = os.environ["ekqb jmrq rrdh czwf"]
+ALERT_TO       = [e.strip() for e in os.environ["sujal@hitechnepal.com.np, subodh@hitechnepal.com.np"].split(",")]
 
 STATE_FILE     = "state.json"   # tracks last-seen ticket ID + minor queue
 MODE           = os.environ.get("MODE", "check")   # "check" | "digest"
