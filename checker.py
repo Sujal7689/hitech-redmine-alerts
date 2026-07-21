@@ -1,8 +1,6 @@
 """
-HiTech Redmine Discrepancy Alert System
-- Checks every new Installation ticket (Project 3, Tracker 11)
-- Sends one email per ticket listing ALL issues found
-- Uses Microsoft Graph API for sending (no SMTP/password needed)
+HiTech Redmine Discrepancy Alert System v4
+Approved ruleset — 2026-07-20
 """
 
 import os
@@ -17,14 +15,13 @@ REDMINE_KEY = "fff4a2a98f942c806109e44d54710c57bf949617"
 PROJECT_ID  = 3
 TRACKER_ID  = 11
 
-# Microsoft Graph API config
 TENANT_ID     = "ee2c1707-fe2f-449b-bf11-679c0e05b4af"
 CLIENT_ID     = "a9511178-6add-4011-b94d-738d2c74ffbe"
 CLIENT_SECRET = "6Jj8Q~HXhYq0F8xnTRB4pBEJ-.uA~YArjQzCBchH"
 SENDER_EMAIL  = "alerts@hitechnepal.com.np"
 ALERT_TO      = ["sujal@hitechnepal.com.np", "subodh@hitechnepal.com.np"]
 
-STATE_FILE  = "state.json"
+STATE_FILE = "state.json"
 
 # ── Custom Field IDs ──────────────────────────────────────────────────────────
 CF = {
@@ -52,9 +49,9 @@ CF = {
     "amc_amount":       99,
     "asc_amount":       100,
     "server_type":      38,
+    "cloud_server_type":123,
     "cloud_url":        142,
     "company_group_id": 117,
-    "ird_doc":          145,
 }
 
 VALID_PAYMENT_STATUSES = {
@@ -89,13 +86,14 @@ def cf_val(issue, cf_id):
 BLANK_VALUES = {
     "", ".", "..", "...", "....", ".....",
     "n.a", "n,a", "na", "NA", "N/A", "n/a",
-    "-", "null", "NULL", "none", "None", "0"
+    "-", "null", "NULL", "none", "None",
 }
 
 def is_blank(val):
     return not val or val in BLANK_VALUES
 
 def is_numeric_clean(val):
+    """True only if val is a plain number — no text, commas, symbols, spaces."""
     if not val:
         return False
     try:
@@ -115,29 +113,29 @@ def has_leading_dot(val):
         and val[1:].replace(".", "").isdigit()
     )
 
-def has_formula_text(val):
-    if not val:
-        return False
-    return any(c in val for c in ["+", "%"]) or (
-        "," in val and any(c.isalpha() for c in val)
-    )
-
-def has_commas(val):
-    return bool(val and "," in val and not any(c.isalpha() for c in val))
-
-def is_cloud_product(issue):
+def is_cloud(issue):
     return cf_val(issue, CF["software_cat"]) in CLOUD_CATEGORIES
+
+def is_desktop(issue):
+    return not is_cloud(issue)
 
 def ticket_status(issue):
     return issue.get("status", {}).get("name", "")
 
+def is_closed_or_resolved(issue):
+    return ticket_status(issue) in ("Closed", "Resolved")
+
 # ── Rules Engine ──────────────────────────────────────────────────────────────
 def check_ticket(issue):
-    issues = []
+    found = []
 
-    def flag(severity, field, desc):
-        issues.append((severity, field, desc))
+    def crit(field, desc):
+        found.append(("CRITICAL", field, desc))
 
+    def warn(field, desc):
+        found.append(("WARNING", field, desc))
+
+    # Field values
     pay_status  = cf_val(issue, CF["payment_status"])
     pay_flag    = cf_val(issue, CF["payment_received"])
     total       = cf_val(issue, CF["total_amount"])
@@ -156,146 +154,122 @@ def check_ticket(issue):
     bill_type   = cf_val(issue, CF["bill_type"])
     sales_exec  = cf_val(issue, CF["sales_executive"])
     address     = cf_val(issue, CF["address"])
-    email_id    = cf_val(issue, CF["email_id"])
-    sw_cat      = cf_val(issue, CF["software_cat"])
-    cloud_url   = cf_val(issue, CF["cloud_url"])
-    company_gid = cf_val(issue, CF["company_group_id"])
     amc         = cf_val(issue, CF["amc_amount"])
     asc         = cf_val(issue, CF["asc_amount"])
-    status      = ticket_status(issue)
-    is_cloud    = is_cloud_product(issue)
-    is_closed   = status == "Closed"
+    company_gid = cf_val(issue, CF["company_group_id"])
+    cloud_stype = cf_val(issue, CF["cloud_server_type"])
+    sw_cat      = cf_val(issue, CF["software_cat"])
+    cloud       = is_cloud(issue)
+    closed      = is_closed_or_resolved(issue)
 
-    # PAYMENT STATUS
+    # ── CRITICAL: Payment Status ──────────────────────────────────────────────
     if is_blank(pay_status):
-        flag("CRITICAL", "Payment Status", "Blank — must be set to Credit / Fully Paid / Advance Paid / Partially Paid")
+        crit("Payment Status", "Blank — must be Credit / Fully Paid / Advance Paid / Partially Paid")
     elif pay_status not in VALID_PAYMENT_STATUSES:
-        flag("CRITICAL", "Payment Status", f"Invalid value: '{pay_status}'")
+        crit("Payment Status", f"Invalid value: '{pay_status}'")
 
-    # TOTAL AMOUNT
+    # ── CRITICAL: Total Amount ────────────────────────────────────────────────
     if is_blank(total) or total == "0":
-        flag("CRITICAL", "Total Amount", "Blank or zero")
-    elif has_formula_text(total):
-        flag("CRITICAL", "Total Amount", f"Contains formula text instead of a number: '{total}'")
-    elif has_commas(total):
-        flag("CRITICAL", "Total Amount", f"Has comma formatting — remove commas: '{total}'")
+        crit("Total Amount", "Blank or zero")
     elif not is_numeric_clean(total):
-        flag("CRITICAL", "Total Amount", f"Not a clean number: '{total}'")
+        crit("Total Amount", f"Not a clean number — remove text/commas/symbols: '{total}'")
 
-    # RECEIVED AMOUNT
+    # ── CRITICAL: Received Amount ─────────────────────────────────────────────
     if not is_blank(received) and received != "0":
         if has_leading_dot(received):
-            flag("CRITICAL", "Received Amount", f"Leading dot — system reads as 0: '{received}' → should be '{received.lstrip('.')}'")
-        elif has_formula_text(received):
-            flag("CRITICAL", "Received Amount", f"Contains formula text: '{received}'")
-        elif has_commas(received):
-            flag("CRITICAL", "Received Amount", f"Has comma formatting — remove commas: '{received}'")
+            crit("Received Amount", f"Leading dot — system reads as 0: '{received}' → correct to '{received.lstrip('.')}'")
         elif not is_numeric_clean(received):
-            flag("CRITICAL", "Received Amount", f"Not a clean number: '{received}'")
+            crit("Received Amount", f"Not a clean number — remove text/commas/symbols: '{received}'")
 
-    # PAYMENT FLAG vs STATUS
+    # ── CRITICAL: Payment flag vs status ─────────────────────────────────────
     if pay_status == "Fully Paid":
         if is_blank(received) or received == "0":
-            flag("CRITICAL", "Received Amount", "Payment Status = Fully Paid but Received Amount is blank or zero")
+            crit("Received Amount", "Payment Status = Fully Paid but Received Amount is blank or zero")
         if pay_flag != "1":
-            flag("CRITICAL", "Payment Received Flag", "Payment Status = Fully Paid but Payment Received checkbox is not ticked")
+            crit("Payment Received Flag", "Payment Status = Fully Paid but Payment Received checkbox is not ticked")
     if pay_flag == "1" and pay_status == "Credit":
-        flag("CRITICAL", "Payment Status", "Payment Received flag = YES but Status still shows Credit — update status")
+        crit("Payment Status", "Payment Received = YES but Status still shows Credit — update to Fully Paid")
 
-    # RECEIVED > TOTAL
+    # ── CRITICAL: Received > Total by more than 6% ───────────────────────────
     if is_numeric_clean(total) and is_numeric_clean(received):
         t = float(total)
         r = float(received)
         if t > 0 and r > t * 1.06:
-            flag("CRITICAL", "Amount Mismatch", f"Received ({r:,.0f}) exceeds Total ({t:,.0f}) by more than 6%")
+            crit("Amount Mismatch", f"Received ({r:,.0f}) exceeds Total ({t:,.0f}) by more than 6% — verify amounts")
 
-    # VAT FIELD
+    # ── CRITICAL: VAT Amount ──────────────────────────────────────────────────
     if not is_blank(vat):
-        if has_leading_dot(vat):
-            flag("CRITICAL", "VAT Amount", f"Leading dot: '{vat}' — remove the dot")
-        elif vat in ["...", "....", "..", "....."]:
-            flag("CRITICAL", "VAT Amount", f"Placeholder dots: '{vat}'")
-        elif has_commas(vat):
-            flag("WARNING", "VAT Amount", f"Has comma formatting: '{vat}' → remove commas")
+        if not is_numeric_clean(vat):
+            crit("VAT Amount", f"Not a clean number: '{vat}' — enter numeric value only (e.g. 4550)")
 
-    # LOCK FIELDS
-    if not is_cloud:
+    # ── CRITICAL: Lock fields (desktop only) ──────────────────────────────────
+    if not cloud:
         if lock_issued == "1" and is_blank(lock_no):
-            flag("CRITICAL", "Lock No", "Lock Issued = YES but Lock No is empty")
+            crit("Lock No", "Lock Issued = YES but Lock No is empty")
         if lock_issued == "1" and is_blank(lock_batch):
-            flag("WARNING", "Lock Batch No", "Lock Issued = YES but Batch No is empty")
+            crit("Lock Batch No", "Lock Issued = YES but Batch No is empty")
         if lock_issued == "1" and is_blank(lock_date):
-            flag("WARNING", "Lock Issued Date", "Lock Issued = YES but Lock Date not filled")
+            crit("Lock Issued Date", "Lock Issued = YES but Lock Date is empty")
         if lock_issued == "0" and not is_blank(lock_no):
-            flag("CRITICAL", "Lock Issued", "Lock No is filled but Lock Issued checkbox = NO")
+            crit("Lock Issued", f"Lock No is filled ('{lock_no}') but Lock Issued checkbox = NO — tick the checkbox")
+        # Detect reversed fields
         if not is_blank(lock_no) and not is_blank(lock_batch):
-            lock_no_looks_like_batch = lock_no.startswith("5524-") or lock_no.startswith("5523-")
-            batch_looks_like_serial  = lock_batch.startswith("1003-") or lock_batch.startswith("2003-")
-            if lock_no_looks_like_batch and batch_looks_like_serial:
-                flag("CRITICAL", "Lock No / Batch No", "Fields appear REVERSED — Lock No contains batch number and Batch No contains serial number")
-        if is_blank(lock_issued) and is_closed:
-            flag("WARNING", "Lock Issued", "Ticket is closed but Lock Issued field is blank")
-    else:
-        if lock_issued == "1" and is_blank(lock_no):
-            flag("WARNING", "Lock Issued", "Cloud product — Lock Issued = YES but no Lock No. Consider reverting to NO")
+            no_looks_batch  = lock_no.startswith("5524-") or lock_no.startswith("5523-")
+            batch_looks_no  = lock_batch.startswith("1003-") or lock_batch.startswith("2003-")
+            if no_looks_batch and batch_looks_no:
+                crit("Lock No / Batch No", "Fields are REVERSED — Lock No contains batch number and vice versa — swap them")
 
-    # LICENSE FIELDS
-    if is_blank(lic_code) and not is_blank(lic_date):
-        flag("WARNING", "License Code", "License Date is filled but License Code is empty")
-    if not is_blank(lic_code) and is_blank(lic_date):
-        flag("WARNING", "License Issue Date", "License Code is filled but License Date is empty")
-    if is_closed and is_blank(lic_code):
-        flag("WARNING", "License Code", "Ticket is closed but License Code is still empty")
-    if is_closed and is_blank(lic_date):
-        flag("WARNING", "License Issue Date", "Ticket is closed but License Issue Date is still empty")
+    # ── CRITICAL: License fields (cloud only, any status) ────────────────────
+    if cloud:
+        if is_blank(lic_code):
+            crit("License Code", f"Cloud product ({sw_cat}) — License Code must be filled")
+        if is_blank(lic_date):
+            crit("License Issue Date", f"Cloud product ({sw_cat}) — License Issue Date must be filled")
 
-    # SOFTWARE EXPIRY
-    if is_closed and is_blank(expiry):
-        flag("WARNING", "Software Expiry Date", "Ticket is closed but Software Expiry Date is blank")
+    # ── CRITICAL: Software Expiry (closed tickets) ────────────────────────────
+    if closed and is_blank(expiry):
+        crit("Software Expiry Date", "Ticket is closed but Software Expiry Date is blank")
 
-    # BILL TYPE
-    if is_blank(bill_type):
-        flag("WARNING", "Bill Type", "Bill Type is blank")
-    elif bill_type in ["NA", "N/A", "na"] and is_closed:
-        flag("WARNING", "Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type")
+    # ── CRITICAL: AMC / ASC amounts ───────────────────────────────────────────
+    if not cloud and (is_blank(amc) or amc == "0"):
+        crit("AMC Amount", "Desktop product but AMC Amount (Next Year) is blank or zero")
+    if cloud and (is_blank(asc) or asc == "0"):
+        crit("ASC Amount", f"Cloud product but Annual Subscription (ASC) amount is blank or zero")
 
-    # CONTACT DATA
+    # ── WARNING: Contact data ─────────────────────────────────────────────────
     if is_blank(contact):
-        flag("WARNING", "Contact Person", "Blank — fill in client contact name")
-    if phone and "@" in phone:
-        flag("WARNING", "Phone / Mobile", f"Email address entered in Phone field: '{phone}'")
-    if is_blank(phone) and is_blank(email_id):
-        flag("WARNING", "Contact Details", "Both Phone and Email are blank")
+        warn("Contact Person", "Blank — fill in client contact name")
     if is_blank(address):
-        flag("WARNING", "Client Address", "Blank")
+        warn("Client Address", "Blank")
+    if phone and "@" in phone:
+        warn("Phone / Mobile", f"Email address entered in Phone field: '{phone}' — move to Email field")
     if pan and not is_blank(pan) and pan.lower() not in ["n/a", "n.a", "na"]:
         digits = re.sub(r"\D", "", pan)
         if len(digits) > 0 and len(digits) != 9:
-            flag("WARNING", "PAN Number", f"{len(digits)} digits found — Nepal PAN must be 9 digits: '{pan}'")
+            warn("PAN Number", f"{len(digits)} digits found — Nepal PAN must be 9 digits: '{pan}'")
 
-    # SALES EXECUTIVE
+    # ── WARNING: Sales Executive ──────────────────────────────────────────────
     if is_blank(sales_exec):
-        flag("WARNING", "Sales Executive", "Blank — assign a sales executive")
+        warn("Sales Executive", "Blank — assign a sales executive")
 
-    # CLOUD-SPECIFIC
-    if is_cloud:
+    # ── WARNING: Bill Type ────────────────────────────────────────────────────
+    if is_blank(bill_type):
+        warn("Bill Type", "Blank — set to Vat Bill / Internal Bill / PI")
+    elif bill_type in ["NA", "N/A", "na"] and closed:
+        warn("Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type issued")
+
+    # ── WARNING: Cloud-specific ───────────────────────────────────────────────
+    if cloud:
         if is_blank(company_gid):
-            flag("WARNING", "Company Group ID", "Cloud product but Company Group ID is blank")
-        if is_closed and is_blank(cloud_url):
-            flag("WARNING", "Cloud/Web URL", "Cloud product — ticket closed but Cloud URL not filled")
-        if is_blank(asc) or asc == "0":
-            flag("WARNING", "ASC Amount", "Cloud product but Annual Subscription (ASC) amount is blank")
+            warn("Company Group ID", f"Cloud product ({sw_cat}) — Company Group ID is blank")
+        if is_blank(cloud_stype):
+            warn("Cloud Server Type", f"Cloud product ({sw_cat}) — Cloud Server Type is blank (e.g. prod, prod02, web)")
 
-    # DESKTOP-SPECIFIC
-    if not is_cloud:
-        if is_blank(amc) or amc == "0":
-            flag("WARNING", "AMC Amount", "Desktop product but AMC amount is blank")
-
-    return issues
+    return found
 
 # ── Microsoft Graph Email ─────────────────────────────────────────────────────
 def get_access_token():
-    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         "grant_type":    "client_credentials",
         "client_id":     CLIENT_ID,
@@ -312,69 +286,61 @@ def send_email(subject, html_body):
     payload = {
         "message": {
             "subject": subject,
-            "body": {
-                "contentType": "HTML",
-                "content": html_body,
-            },
+            "body": {"contentType": "HTML", "content": html_body},
             "toRecipients": [
-                {"emailAddress": {"address": addr}} for addr in ALERT_TO
+                {"emailAddress": {"address": a}} for a in ALERT_TO
             ],
         }
     }
     resp = requests.post(
         url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type":  "application/json",
-        },
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json=payload,
-        timeout=30
+        timeout=30,
     )
     resp.raise_for_status()
-    print(f"    Email sent successfully (status {resp.status_code})")
+    print(f"    Email sent (HTTP {resp.status_code})")
 
 def ticket_url(tid):
     return f"{REDMINE_URL}/issues/{tid}"
 
-def build_email_html(issue, all_issues):
+def build_email(issue, all_issues):
     tid     = issue["id"]
-    company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"Ticket #{tid}")
+    company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"#{tid}")
     author  = issue.get("author", {}).get("name", "Unknown")
     created = issue.get("created_on", "")[:10]
     status  = ticket_status(issue)
     sw_cat  = cf_val(issue, CF["software_cat"])
     url     = ticket_url(tid)
 
-    critical_items = [(f, d) for s, f, d in all_issues if s == "CRITICAL"]
-    warning_items  = [(f, d) for s, f, d in all_issues if s == "WARNING"]
+    crits = [(f, d) for s, f, d in all_issues if s == "CRITICAL"]
+    warns = [(f, d) for s, f, d in all_issues if s == "WARNING"]
 
-    def rows(items, color, bg, icon, label):
+    def make_rows(items, bg_header, color_header, icon, label):
         if not items:
             return ""
-        header = f"""<tr>
-          <th colspan="2" style="padding:8px 14px;background:{bg};color:{color};
-              font-size:11px;text-transform:uppercase;letter-spacing:.5px;text-align:left">
-            {icon} {label}
-          </th></tr>"""
-        body = "".join(f"""<tr>
-          <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
-              font-weight:600;color:#374151;width:160px;vertical-align:top">{f}</td>
-          <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
-              color:#6b7280;vertical-align:top">{d}</td>
+        hdr = f"""<tr><th colspan="2" style="padding:9px 14px;background:{bg_header};
+            color:{color_header};font-size:11px;text-transform:uppercase;
+            letter-spacing:.5px;text-align:left">{icon} {label}</th></tr>"""
+        rows = "".join(f"""<tr>
+            <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
+                font-weight:600;color:#374151;width:170px;vertical-align:top">{f}</td>
+            <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
+                color:#6b7280;vertical-align:top">{d}</td>
         </tr>""" for f, d in items)
-        return header + body
+        return hdr + rows
 
-    critical_rows = rows(critical_items, "#991b1b", "#fee2e2", "🔴", "Critical Issues")
-    warning_rows  = rows(warning_items,  "#92400e", "#fef3c7", "🟡", "Warnings")
+    crit_rows = make_rows(crits, "#fee2e2", "#991b1b", "🔴", f"Critical Issues ({len(crits)})")
+    warn_rows = make_rows(warns, "#fef3c7", "#92400e", "🟡", f"Warnings ({len(warns)})")
 
-    header_color = "#dc2626" if critical_items else "#d97706"
-    title        = "🚨 Critical Issues Found" if critical_items else "⚠️ Data Issues Found"
-    count_line   = f"{len(critical_items)} critical, {len(warning_items)} warning(s)" if critical_items else f"{len(warning_items)} warning(s)"
+    hdr_color  = "#dc2626" if crits else "#d97706"
+    title      = "🚨 Critical Issues Found" if crits else "⚠️ Data Issues Found"
+    count_line = f"{len(crits)} critical, {len(warns)} warning(s)" if crits else f"{len(warns)} warning(s)"
 
     return f"""
 <div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;margin:0 auto">
-  <div style="background:{header_color};padding:16px 24px;border-radius:8px 8px 0 0">
-    <h2 style="color:#fff;margin:0;font-size:16px">{title} — New Ticket #{tid}</h2>
+  <div style="background:{hdr_color};padding:16px 24px;border-radius:8px 8px 0 0">
+    <h2 style="color:#fff;margin:0;font-size:16px">{title} — Ticket #{tid}</h2>
     <p style="color:rgba(255,255,255,.8);margin:4px 0 0;font-size:13px">{count_line}</p>
   </div>
   <div style="border:1px solid #e5e7eb;border-top:none;background:#fff;
@@ -383,7 +349,8 @@ def build_email_html(issue, all_issues):
         font-size:13px;background:#f9fafb;border-radius:6px">
       <tr>
         <td style="padding:6px 14px;color:#6b7280;width:130px">Ticket</td>
-        <td style="padding:6px 14px"><a href="{url}" style="color:#2563eb;font-weight:600">#{tid}</a></td>
+        <td style="padding:6px 14px"><a href="{url}" style="color:#2563eb;
+            font-weight:600">#{tid}</a></td>
       </tr>
       <tr style="background:#f3f4f6">
         <td style="padding:6px 14px;color:#6b7280">Company</td>
@@ -403,19 +370,16 @@ def build_email_html(issue, all_issues):
       </tr>
     </table>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
-      {critical_rows}
-      {warning_rows}
+      {crit_rows}{warn_rows}
     </table>
     <div style="margin-top:16px">
-      <a href="{url}" style="display:inline-block;background:{header_color};color:#fff;
-          padding:9px 20px;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600">
-        Open Ticket in Redmine →
-      </a>
+      <a href="{url}" style="display:inline-block;background:{hdr_color};
+          color:#fff;padding:9px 20px;border-radius:6px;text-decoration:none;
+          font-size:13px;font-weight:600">Open Ticket in Redmine →</a>
     </div>
   </div>
   <p style="font-size:11px;color:#9ca3af;margin-top:8px;text-align:center">
-    HiTech Redmine Alert System — auto-generated
-  </p>
+    HiTech Redmine Alert System v4</p>
 </div>"""
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
@@ -436,7 +400,7 @@ def fetch_new_tickets(since_id):
                 "offset":     offset,
                 "sort":       "id:asc",
             },
-            timeout=30
+            timeout=30,
         )
         resp.raise_for_status()
         data  = resp.json()
@@ -457,11 +421,11 @@ def run():
     since_id = state.get("last_ticket_id", 0)
     max_id   = since_id
 
-    print(f"Checking for tickets newer than ID {since_id}...")
-    new_tickets = fetch_new_tickets(since_id)
-    print(f"Found {len(new_tickets)} new ticket(s)")
+    print(f"Checking tickets newer than ID {since_id}...")
+    tickets = fetch_new_tickets(since_id)
+    print(f"Found {len(tickets)} new ticket(s)")
 
-    for issue in new_tickets:
+    for issue in tickets:
         tid     = issue["id"]
         max_id  = max(max_id, tid)
         company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"#{tid}")
@@ -471,12 +435,12 @@ def run():
         if not found:
             print(f"  #{tid} {company}: ✓ Clean")
         else:
-            criticals = [x for x in found if x[0] == "CRITICAL"]
-            warnings  = [x for x in found if x[0] == "WARNING"]
-            print(f"  #{tid} {company}: {len(criticals)} critical, {len(warnings)} warning(s) — sending email")
-            prefix = "🚨" if criticals else "⚠️"
-            subj   = f"{prefix} Redmine #{tid} — {len(found)} issue(s) found — {company}"
-            html   = build_email_html(issue, found)
+            crits = [x for x in found if x[0] == "CRITICAL"]
+            warns = [x for x in found if x[0] == "WARNING"]
+            print(f"  #{tid} {company}: {len(crits)} critical, {len(warns)} warning(s) — sending email")
+            prefix = "🚨" if crits else "⚠️"
+            subj   = f"{prefix} Redmine #{tid} — {len(found)} issue(s) — {company}"
+            html   = build_email(issue, found)
             send_email(subj, html)
 
     state["last_ticket_id"] = max_id
