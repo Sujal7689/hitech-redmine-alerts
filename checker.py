@@ -1,13 +1,14 @@
 """
-HiTech Redmine Discrepancy Alert System v4
-Approved ruleset — 2026-07-20
+HiTech Redmine Discrepancy Alert System v5
+- Triggered on every ticket create/update via Redmine webhook
+- Checks the specific ticket that was created/updated
+- Sends one email per ticket listing ALL issues found
 """
 
 import os
 import json
 import re
 import requests
-from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
 REDMINE_URL = "http://3.7.179.127:82/redmine"
@@ -21,37 +22,34 @@ CLIENT_SECRET = "6Jj8Q~HXhYq0F8xnTRB4pBEJ-.uA~YArjQzCBchH"
 SENDER_EMAIL  = "alerts@hitechnepal.com.np"
 ALERT_TO      = ["sujal@hitechnepal.com.np", "subodh@hitechnepal.com.np"]
 
-STATE_FILE = "state.json"
-
 # ── Custom Field IDs ──────────────────────────────────────────────────────────
 CF = {
-    "company_name":     2,
-    "pan":              90,
-    "address":          3,
-    "contact_person":   4,
-    "phone":            5,
-    "email_id":         6,
-    "software_cat":     26,
-    "bill_type":        94,
-    "vat":              105,
-    "total_amount":     106,
-    "payment_received": 91,
-    "payment_status":   81,
-    "received_amount":  111,
-    "lock_issued":      85,
-    "lock_no":          86,
-    "lock_batch":       95,
-    "lock_date":        87,
-    "software_expiry":  141,
-    "license_code":     93,
-    "license_date":     92,
-    "sales_executive":  51,
-    "amc_amount":       99,
-    "asc_amount":       100,
-    "server_type":      38,
-    "cloud_server_type":123,
-    "cloud_url":        142,
-    "company_group_id": 117,
+    "company_name":      2,
+    "address":           3,
+    "contact_person":    4,
+    "phone":             5,
+    "email_id":          6,
+    "software_cat":      26,
+    "bill_type":         94,
+    "vat":               105,
+    "total_amount":      106,
+    "payment_received":  91,
+    "payment_status":    81,
+    "received_amount":   111,
+    "lock_issued":       85,
+    "lock_no":           86,
+    "lock_batch":        95,
+    "lock_date":         87,
+    "software_expiry":   141,
+    "license_code":      93,
+    "license_date":      92,
+    "sales_executive":   51,
+    "amc_amount":        99,
+    "asc_amount":        100,
+    "cloud_server_type": 123,
+    "cloud_url":         142,
+    "company_group_id":  117,
+    "pan":               90,
 }
 
 VALID_PAYMENT_STATUSES = {
@@ -64,16 +62,6 @@ CLOUD_CATEGORIES = {
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    return {"last_ticket_id": 0}
-
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
-
 def cf_val(issue, cf_id):
     for cf in issue.get("custom_fields", []):
         if cf["id"] == cf_id:
@@ -93,7 +81,6 @@ def is_blank(val):
     return not val or val in BLANK_VALUES
 
 def is_numeric_clean(val):
-    """True only if val is a plain number — no text, commas, symbols, spaces."""
     if not val:
         return False
     try:
@@ -116,13 +103,10 @@ def has_leading_dot(val):
 def is_cloud(issue):
     return cf_val(issue, CF["software_cat"]) in CLOUD_CATEGORIES
 
-def is_desktop(issue):
-    return not is_cloud(issue)
-
 def ticket_status(issue):
     return issue.get("status", {}).get("name", "")
 
-def is_closed_or_resolved(issue):
+def is_closed(issue):
     return ticket_status(issue) in ("Closed", "Resolved")
 
 # ── Rules Engine ──────────────────────────────────────────────────────────────
@@ -135,7 +119,6 @@ def check_ticket(issue):
     def warn(field, desc):
         found.append(("WARNING", field, desc))
 
-    # Field values
     pay_status  = cf_val(issue, CF["payment_status"])
     pay_flag    = cf_val(issue, CF["payment_received"])
     total       = cf_val(issue, CF["total_amount"])
@@ -160,7 +143,7 @@ def check_ticket(issue):
     cloud_stype = cf_val(issue, CF["cloud_server_type"])
     sw_cat      = cf_val(issue, CF["software_cat"])
     cloud       = is_cloud(issue)
-    closed      = is_closed_or_resolved(issue)
+    closed      = is_closed(issue)
 
     # ── CRITICAL: Payment Status ──────────────────────────────────────────────
     if is_blank(pay_status):
@@ -190,7 +173,7 @@ def check_ticket(issue):
     if pay_flag == "1" and pay_status == "Credit":
         crit("Payment Status", "Payment Received = YES but Status still shows Credit — update to Fully Paid")
 
-    # ── CRITICAL: Received > Total by more than 6% ───────────────────────────
+    # ── CRITICAL: Received > Total ────────────────────────────────────────────
     if is_numeric_clean(total) and is_numeric_clean(received):
         t = float(total)
         r = float(received)
@@ -212,10 +195,9 @@ def check_ticket(issue):
             crit("Lock Issued Date", "Lock Issued = YES but Lock Date is empty")
         if lock_issued == "0" and not is_blank(lock_no):
             crit("Lock Issued", f"Lock No is filled ('{lock_no}') but Lock Issued checkbox = NO — tick the checkbox")
-        # Detect reversed fields
         if not is_blank(lock_no) and not is_blank(lock_batch):
-            no_looks_batch  = lock_no.startswith("5524-") or lock_no.startswith("5523-")
-            batch_looks_no  = lock_batch.startswith("1003-") or lock_batch.startswith("2003-")
+            no_looks_batch = lock_no.startswith("5524-") or lock_no.startswith("5523-")
+            batch_looks_no = lock_batch.startswith("1003-") or lock_batch.startswith("2003-")
             if no_looks_batch and batch_looks_no:
                 crit("Lock No / Batch No", "Fields are REVERSED — Lock No contains batch number and vice versa — swap them")
 
@@ -226,15 +208,15 @@ def check_ticket(issue):
         if is_blank(lic_date):
             crit("License Issue Date", f"Cloud product ({sw_cat}) — License Issue Date must be filled")
 
-    # ── CRITICAL: Software Expiry (closed tickets) ────────────────────────────
+    # ── CRITICAL: Software Expiry on closed tickets ───────────────────────────
     if closed and is_blank(expiry):
         crit("Software Expiry Date", "Ticket is closed but Software Expiry Date is blank")
 
-    # ── CRITICAL: AMC / ASC amounts ───────────────────────────────────────────
+    # ── CRITICAL: AMC / ASC ───────────────────────────────────────────────────
     if not cloud and (is_blank(amc) or amc == "0"):
-        crit("AMC Amount", "Desktop product but AMC Amount (Next Year) is blank or zero")
+        crit("AMC Amount", "Desktop product but AMC Amount is blank or zero")
     if cloud and (is_blank(asc) or asc == "0"):
-        crit("ASC Amount", f"Cloud product but Annual Subscription (ASC) amount is blank or zero")
+        crit("ASC Amount", f"Cloud product ({sw_cat}) but Annual Subscription (ASC) amount is blank or zero")
 
     # ── WARNING: Contact data ─────────────────────────────────────────────────
     if is_blank(contact):
@@ -246,7 +228,7 @@ def check_ticket(issue):
     if pan and not is_blank(pan) and pan.lower() not in ["n/a", "n.a", "na"]:
         digits = re.sub(r"\D", "", pan)
         if len(digits) > 0 and len(digits) != 9:
-            warn("PAN Number", f"{len(digits)} digits found — Nepal PAN must be 9 digits: '{pan}'")
+            warn("PAN Number", f"{len(digits)} digits — Nepal PAN must be 9 digits: '{pan}'")
 
     # ── WARNING: Sales Executive ──────────────────────────────────────────────
     if is_blank(sales_exec):
@@ -256,16 +238,34 @@ def check_ticket(issue):
     if is_blank(bill_type):
         warn("Bill Type", "Blank — set to Vat Bill / Internal Bill / PI")
     elif bill_type in ["NA", "N/A", "na"] and closed:
-        warn("Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type issued")
+        warn("Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type")
 
     # ── WARNING: Cloud-specific ───────────────────────────────────────────────
     if cloud:
         if is_blank(company_gid):
             warn("Company Group ID", f"Cloud product ({sw_cat}) — Company Group ID is blank")
         if is_blank(cloud_stype):
-            warn("Cloud Server Type", f"Cloud product ({sw_cat}) — Cloud Server Type is blank (e.g. prod, prod02, web)")
+            warn("Cloud Server Type", f"Cloud product ({sw_cat}) — Cloud Server Type is blank")
 
     return found
+
+# ── Fetch single ticket ───────────────────────────────────────────────────────
+def fetch_ticket(ticket_id):
+    headers = {"X-Redmine-API-Key": REDMINE_KEY}
+    resp = requests.get(
+        f"{REDMINE_URL}/issues/{ticket_id}.json",
+        headers=headers,
+        params={"include": "custom_fields"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    issue = resp.json()["issue"]
+    # Only process Installation tracker in our project
+    if issue.get("project", {}).get("id") != PROJECT_ID:
+        return None
+    if issue.get("tracker", {}).get("id") != TRACKER_ID:
+        return None
+    return issue
 
 # ── Microsoft Graph Email ─────────────────────────────────────────────────────
 def get_access_token():
@@ -309,6 +309,7 @@ def build_email(issue, all_issues):
     company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"#{tid}")
     author  = issue.get("author", {}).get("name", "Unknown")
     created = issue.get("created_on", "")[:10]
+    updated = issue.get("updated_on", "")[:10]
     status  = ticket_status(issue)
     sw_cat  = cf_val(issue, CF["software_cat"])
     url     = ticket_url(tid)
@@ -316,11 +317,11 @@ def build_email(issue, all_issues):
     crits = [(f, d) for s, f, d in all_issues if s == "CRITICAL"]
     warns = [(f, d) for s, f, d in all_issues if s == "WARNING"]
 
-    def make_rows(items, bg_header, color_header, icon, label):
+    def make_rows(items, bg_hdr, col_hdr, icon, label):
         if not items:
             return ""
-        hdr = f"""<tr><th colspan="2" style="padding:9px 14px;background:{bg_header};
-            color:{color_header};font-size:11px;text-transform:uppercase;
+        hdr = f"""<tr><th colspan="2" style="padding:9px 14px;background:{bg_hdr};
+            color:{col_hdr};font-size:11px;text-transform:uppercase;
             letter-spacing:.5px;text-align:left">{icon} {label}</th></tr>"""
         rows = "".join(f"""<tr>
             <td style="padding:7px 14px;border-bottom:1px solid #f3f4f6;
@@ -349,8 +350,8 @@ def build_email(issue, all_issues):
         font-size:13px;background:#f9fafb;border-radius:6px">
       <tr>
         <td style="padding:6px 14px;color:#6b7280;width:130px">Ticket</td>
-        <td style="padding:6px 14px"><a href="{url}" style="color:#2563eb;
-            font-weight:600">#{tid}</a></td>
+        <td style="padding:6px 14px"><a href="{url}"
+            style="color:#2563eb;font-weight:600">#{tid}</a></td>
       </tr>
       <tr style="background:#f3f4f6">
         <td style="padding:6px 14px;color:#6b7280">Company</td>
@@ -365,8 +366,12 @@ def build_email(issue, all_issues):
         <td style="padding:6px 14px">{status}</td>
       </tr>
       <tr>
-        <td style="padding:6px 14px;color:#6b7280">Raised by</td>
+        <td style="padding:6px 14px;color:#6b7280">Created by</td>
         <td style="padding:6px 14px">{author} on {created}</td>
+      </tr>
+      <tr style="background:#f3f4f6">
+        <td style="padding:6px 14px;color:#6b7280">Last updated</td>
+        <td style="padding:6px 14px">{updated}</td>
       </tr>
     </table>
     <table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -379,72 +384,40 @@ def build_email(issue, all_issues):
     </div>
   </div>
   <p style="font-size:11px;color:#9ca3af;margin-top:8px;text-align:center">
-    HiTech Redmine Alert System v4</p>
+    HiTech Redmine Alert System v5 — triggered on ticket update</p>
 </div>"""
-
-# ── Fetch ─────────────────────────────────────────────────────────────────────
-def fetch_new_tickets(since_id):
-    headers = {"X-Redmine-API-Key": REDMINE_KEY}
-    tickets = []
-    offset  = 0
-    while True:
-        resp = requests.get(
-            f"{REDMINE_URL}/issues.json",
-            headers=headers,
-            params={
-                "project_id": PROJECT_ID,
-                "tracker_id": TRACKER_ID,
-                "status_id":  "*",
-                "include":    "custom_fields",
-                "limit":      100,
-                "offset":     offset,
-                "sort":       "id:asc",
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data  = resp.json()
-        batch = data.get("issues", [])
-        if not batch:
-            break
-        for t in batch:
-            if t["id"] > since_id:
-                tickets.append(t)
-        offset += len(batch)
-        if offset >= data.get("total_count", 0):
-            break
-    return tickets
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run():
-    state    = load_state()
-    since_id = state.get("last_ticket_id", 0)
-    max_id   = since_id
+    # Get ticket ID passed from GitHub Actions via environment variable
+    ticket_id = os.environ.get("TICKET_ID", "").strip()
 
-    print(f"Checking tickets newer than ID {since_id}...")
-    tickets = fetch_new_tickets(since_id)
-    print(f"Found {len(tickets)} new ticket(s)")
+    if not ticket_id:
+        print("No TICKET_ID provided — nothing to check.")
+        return
 
-    for issue in tickets:
-        tid     = issue["id"]
-        max_id  = max(max_id, tid)
-        company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"#{tid}")
+    print(f"Checking ticket #{ticket_id}...")
+    issue = fetch_ticket(int(ticket_id))
 
-        found = check_ticket(issue)
+    if not issue:
+        print(f"Ticket #{ticket_id} is not an Installation ticket in Project 3 — skipping.")
+        return
 
-        if not found:
-            print(f"  #{tid} {company}: ✓ Clean")
-        else:
-            crits = [x for x in found if x[0] == "CRITICAL"]
-            warns = [x for x in found if x[0] == "WARNING"]
-            print(f"  #{tid} {company}: {len(crits)} critical, {len(warns)} warning(s) — sending email")
-            prefix = "🚨" if crits else "⚠️"
-            subj   = f"{prefix} Redmine #{tid} — {len(found)} issue(s) — {company}"
-            html   = build_email(issue, found)
-            send_email(subj, html)
+    company = cf_val(issue, CF["company_name"]) or issue.get("subject", f"#{ticket_id}")
+    found   = check_ticket(issue)
 
-    state["last_ticket_id"] = max_id
-    save_state(state)
+    if not found:
+        print(f"  #{ticket_id} {company}: ✓ Clean — no issues found")
+        return
+
+    crits = [x for x in found if x[0] == "CRITICAL"]
+    warns = [x for x in found if x[0] == "WARNING"]
+    print(f"  #{ticket_id} {company}: {len(crits)} critical, {len(warns)} warning(s) — sending email")
+
+    prefix = "🚨" if crits else "⚠️"
+    subj   = f"{prefix} Redmine #{ticket_id} — {len(found)} issue(s) — {company}"
+    html   = build_email(issue, found)
+    send_email(subj, html)
     print("Done.")
 
 if __name__ == "__main__":
