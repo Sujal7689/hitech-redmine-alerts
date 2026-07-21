@@ -56,10 +56,15 @@ VALID_PAYMENT_STATUSES = {
     "Fully Paid", "Credit", "Advance Paid", "Partially Paid"
 }
 
-CLOUD_CATEGORIES = {
-    "Swastik Gold(CLOUD)", "Swastik Nepal(CLOUD)",
+WEB_CATEGORIES = {
     "Swastik Web", "Swastik Web(Prod)", "Swastik Web(IRD)"
 }
+
+CLOUD_CATEGORIES = {
+    "Swastik Gold(CLOUD)", "Swastik Nepal(CLOUD)"
+}
+
+ALL_CLOUD_CATEGORIES = WEB_CATEGORIES | CLOUD_CATEGORIES
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def cf_val(issue, cf_id):
@@ -101,6 +106,12 @@ def has_leading_dot(val):
     )
 
 def is_cloud(issue):
+    return cf_val(issue, CF["software_cat"]) in ALL_CLOUD_CATEGORIES
+
+def is_web_product(issue):
+    return cf_val(issue, CF["software_cat"]) in WEB_CATEGORIES
+
+def is_cloud_product(issue):
     return cf_val(issue, CF["software_cat"]) in CLOUD_CATEGORIES
 
 def ticket_status(issue):
@@ -201,12 +212,12 @@ def check_ticket(issue):
             if no_looks_batch and batch_looks_no:
                 crit("Lock No / Batch No", "Fields are REVERSED — Lock No contains batch number and vice versa — swap them")
 
-    # ── CRITICAL: License fields (cloud only, any status) ────────────────────
-    if cloud:
+    # ── CRITICAL: License fields (Swastik Web only, any status) ──────────────
+    if is_web_product(issue):
         if is_blank(lic_code):
-            crit("License Code", f"Cloud product ({sw_cat}) — License Code must be filled")
+            crit("License Code", f"{sw_cat} — License Code must be filled")
         if is_blank(lic_date):
-            crit("License Issue Date", f"Cloud product ({sw_cat}) — License Issue Date must be filled")
+            crit("License Issue Date", f"{sw_cat} — License Issue Date must be filled")
 
     # ── CRITICAL: Software Expiry on closed tickets ───────────────────────────
     if closed and is_blank(expiry):
@@ -216,7 +227,7 @@ def check_ticket(issue):
     if not cloud and (is_blank(amc) or amc == "0"):
         crit("AMC Amount", "Desktop product but AMC Amount is blank or zero")
     if cloud and (is_blank(asc) or asc == "0"):
-        crit("ASC Amount", f"Cloud product ({sw_cat}) but Annual Subscription (ASC) amount is blank or zero")
+        crit("ASC Amount", f"{sw_cat} — Annual Subscription (ASC) amount is blank or zero")
 
     # ── WARNING: Contact data ─────────────────────────────────────────────────
     if is_blank(contact):
@@ -240,12 +251,12 @@ def check_ticket(issue):
     elif bill_type in ["NA", "N/A", "na"] and closed:
         warn("Bill Type", "Bill Type is NA on a closed ticket — update to actual bill type")
 
-    # ── WARNING: Cloud-specific ───────────────────────────────────────────────
-    if cloud:
+    # ── WARNING: Swastik Cloud-specific (Gold/Nepal Cloud) ────────────────────
+    if is_cloud_product(issue):
         if is_blank(company_gid):
-            warn("Company Group ID", f"Cloud product ({sw_cat}) — Company Group ID is blank")
+            warn("Company Group ID", f"{sw_cat} — Company Group ID is blank")
         if is_blank(cloud_stype):
-            warn("Cloud Server Type", f"Cloud product ({sw_cat}) — Cloud Server Type is blank")
+            warn("Cloud Server Type", f"{sw_cat} — Cloud Server Type is blank")
 
     return found
 
