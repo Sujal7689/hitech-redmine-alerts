@@ -1,24 +1,19 @@
 name: Redmine Discrepancy Alerts
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
   repository_dispatch:
     types: [redmine-webhook]
+  workflow_dispatch:
+    inputs:
+      ticket_id:
+        description: 'Redmine ticket ID to check'
+        required: false
 
 jobs:
-  check-tickets:
+  check-ticket:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Restore state
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: redmine-state-${{ github.run_id }}
-          restore-keys: redmine-state-
 
       - uses: actions/setup-python@v5
         with:
@@ -27,10 +22,6 @@ jobs:
       - run: pip install requests
 
       - name: Run checker
+        env:
+          TICKET_ID: ${{ github.event.client_payload.ticket_id || github.event.inputs.ticket_id }}
         run: python checker.py
-
-      - name: Save state
-        uses: actions/cache@v4
-        with:
-          path: state.json
-          key: redmine-state-${{ github.run_id }}
